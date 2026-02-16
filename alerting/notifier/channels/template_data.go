@@ -9,7 +9,6 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/prometheus/alertmanager/notify"
@@ -188,23 +187,24 @@ func TmplText(ctx context.Context, tmpl *amtemplate.Template, alerts []*types.Al
 		if *tmplErr != nil {
 			return
 		}
-		s, *tmplErr = executeTextString(tmpl, name, data)
+		s, *tmplErr = executeTextStringWithLimit(tmpl, name, data)
 		return s
 	}, data
 }
 
-func executeTextString(tmpl *amtemplate.Template, name string, data *ExtendedData) (string, error) {
-	textTmpl := template.New("").Option("missingkey=zero")
-	textTmpl, err := textTmpl.Parse(name)
+func executeTextStringWithLimit(tmpl *amtemplate.Template, name string, data *ExtendedData) (string, error) {
+	result, err := tmpl.ExecuteTextString(name, data)
 	if err != nil {
 		return "", err
 	}
+
 	var buf bytes.Buffer
-	err = textTmpl.Execute(utils.NewLimitedWriter(&buf, MaxTemplateOutputSize), data)
-	if errors.Is(err, utils.ErrWriteLimitExceeded) {
-		err = ErrTemplateOutputTooLarge
+	_, writeErr := utils.NewLimitedWriter(&buf, MaxTemplateOutputSize).Write([]byte(result))
+	if errors.Is(writeErr, utils.ErrWriteLimitExceeded) {
+		return "", ErrTemplateOutputTooLarge
 	}
-	return buf.String(), err
+
+	return result, nil
 }
 
 // Firing returns the subset of alerts that are firing.
