@@ -336,26 +336,27 @@ func TmplText(ctx context.Context, tmpl *Template, alerts []*types.Alert, l log.
 		if *tmplErr != nil {
 			return
 		}
-		s, *tmplErr = executeTextString(tmpl, name, data)
+		s, *tmplErr = executeTextStringWithLimit(tmpl, name, data)
 		return s
 	}, data
 }
 
-func executeTextString(tmpl *Template, text string, data *ExtendedData) (string, error) {
-	if text == "" {
-		return "", nil
-	}
-	textTmpl := tmpltext.New("").Option("missingkey=zero")
-	textTmpl, err := textTmpl.Parse(text)
+func executeTextStringWithLimit(tmpl *Template, name string, data *ExtendedData) (string, error) {
+	var buf bytes.Buffer
+	limitedWriter := utils.NewLimitedWriter(&buf, MaxTemplateOutputSize)
+	
+	// Use the template's ExecuteTextString but capture output through limited writer
+	result, err := tmpl.ExecuteTextString(name, data)
 	if err != nil {
 		return "", err
 	}
-	var buf bytes.Buffer
-	err = textTmpl.Execute(utils.NewLimitedWriter(&buf, MaxTemplateOutputSize), data)
-	if errors.Is(err, utils.ErrWriteLimitExceeded) {
-		err = ErrTemplateOutputTooLarge
+	
+	_, writeErr := limitedWriter.Write([]byte(result))
+	if errors.Is(writeErr, utils.ErrWriteLimitExceeded) {
+		return "", ErrTemplateOutputTooLarge
 	}
-	return buf.String(), err
+	
+	return result, nil
 }
 
 // Firing returns the subset of alerts that are firing.
@@ -378,4 +379,16 @@ func (as ExtendedAlerts) Resolved() []ExtendedAlert {
 		}
 	}
 	return res
+}
+
+// resetTimeNow resets the global variable timeNow to the default value, which is time.Now
+func resetTimeNow() {
+	timeNow = time.Now
+}
+
+func mockTimeNow(constTime time.Time) func() {
+	timeNow = func() time.Time {
+		return constTime
+	}
+	return resetTimeNow
 }
