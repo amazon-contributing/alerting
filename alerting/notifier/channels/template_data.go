@@ -1,8 +1,10 @@
 package channels
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"path"
 	"sort"
@@ -10,17 +12,23 @@ import (
 	"time"
 
 	"github.com/prometheus/alertmanager/notify"
-	"github.com/prometheus/alertmanager/template"
+	amtemplate "github.com/prometheus/alertmanager/template"
 	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/common/model"
 
 	"github.com/grafana/alerting/alerting/models"
+	"github.com/grafana/alerting/utils"
+)
+
+var (
+	ErrTemplateOutputTooLarge = errors.New("template output exceeds maximum size")
+	MaxTemplateOutputSize     = int64(10 * 1024 * 1024) // 10MB
 )
 
 type ExtendedAlert struct {
 	Status        string             `json:"status"`
-	Labels        template.KV        `json:"labels"`
-	Annotations   template.KV        `json:"annotations"`
+	Labels        amtemplate.KV      `json:"labels"`
+	Annotations   amtemplate.KV      `json:"annotations"`
 	StartsAt      time.Time          `json:"startsAt"`
 	EndsAt        time.Time          `json:"endsAt"`
 	GeneratorURL  string             `json:"generatorURL"`
@@ -41,14 +49,14 @@ type ExtendedData struct {
 	Status   string         `json:"status"`
 	Alerts   ExtendedAlerts `json:"alerts"`
 
-	GroupLabels       template.KV `json:"groupLabels"`
-	CommonLabels      template.KV `json:"commonLabels"`
-	CommonAnnotations template.KV `json:"commonAnnotations"`
+	GroupLabels       amtemplate.KV `json:"groupLabels"`
+	CommonLabels      amtemplate.KV `json:"commonLabels"`
+	CommonAnnotations amtemplate.KV `json:"commonAnnotations"`
 
 	ExternalURL string `json:"externalURL"`
 }
 
-func removePrivateItems(kv template.KV) template.KV {
+func removePrivateItems(kv amtemplate.KV) amtemplate.KV {
 	for key := range kv {
 		if strings.HasPrefix(key, "__") && strings.HasSuffix(key, "__") {
 			kv = kv.Remove([]string{key})
@@ -57,7 +65,7 @@ func removePrivateItems(kv template.KV) template.KV {
 	return kv
 }
 
-func extendAlert(alert template.Alert, externalURL string, logger Logger) *ExtendedAlert {
+func extendAlert(alert amtemplate.Alert, externalURL string, logger Logger) *ExtendedAlert {
 	// remove "private" annotations & labels so they don't show up in the template
 	extended := &ExtendedAlert{
 		Status:       alert.Status,
@@ -150,7 +158,7 @@ func setOrgIDQueryParam(url *url.URL, orgID string) string {
 	return url.String()
 }
 
-func ExtendData(data *template.Data, logger Logger) *ExtendedData {
+func ExtendData(data *amtemplate.Data, logger Logger) *ExtendedData {
 	alerts := []ExtendedAlert{}
 
 	for _, alert := range data.Alerts {
@@ -171,7 +179,7 @@ func ExtendData(data *template.Data, logger Logger) *ExtendedData {
 	return extended
 }
 
-func TmplText(ctx context.Context, tmpl *template.Template, alerts []*types.Alert, l Logger, tmplErr *error) (func(string) string, *ExtendedData) {
+func TmplText(ctx context.Context, tmpl *amtemplate.Template, alerts []*types.Alert, l Logger, tmplErr *error) (func(string) string, *ExtendedData) {
 	promTmplData := notify.GetTemplateData(ctx, tmpl, alerts, l)
 	data := ExtendData(promTmplData, l)
 
@@ -179,9 +187,24 @@ func TmplText(ctx context.Context, tmpl *template.Template, alerts []*types.Aler
 		if *tmplErr != nil {
 			return
 		}
-		s, *tmplErr = tmpl.ExecuteTextString(name, data)
+		s, *tmplErr = executeTextStringWithLimit(tmpl, name, data)
 		return s
 	}, data
+}
+
+func executeTextStringWithLimit(tmpl *amtemplate.Template, name string, data *ExtendedData) (string, error) {
+	result, err := tmpl.ExecuteTextString(name, data)
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	_, writeErr := utils.NewLimitedWriter(&buf, MaxTemplateOutputSize).Write([]byte(result))
+	if errors.Is(writeErr, utils.ErrWriteLimitExceeded) {
+		return "", ErrTemplateOutputTooLarge
+	}
+
+	return result, nil
 }
 
 // Firing returns the subset of alerts that are firing.
